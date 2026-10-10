@@ -1,0 +1,10 @@
+debug.oculus.localDimming.zl2.enable=0
+debug.oculus.localDimming.zl2.bypass=1
+debug.oculus.localDimming.zl2.hook_mode=0
+debug.oculus.localDimming.zl2.seq=0
+debug.oculus.localDimming.zl2.sampler=0
+debug.oculus.localDimming.zl2.peak_weight=0
+debug.oculus.localDimming.zl2.lut_mode=0
+debug.oculus.localDimming.zl2.lut_count=0
+debug.oculus.localDimming.zl2.lut_threshold=20
+debug.oculus.localDimming.zl2.lut_gamma=1

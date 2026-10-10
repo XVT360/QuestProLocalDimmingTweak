@@ -1,0 +1,23 @@
+Quest Pro Local Dimming 0.5.0
+
+Added original debug controls to the GUI: Dilate X/Y, Gaussian 0..9 with quick
+0..4 buttons, smooth on/off, and smooth.weight capped at the native 0.30 default
+in GUI, root tool and saved-file validation. Gaussian 5..9 require live testing.
+
+Sampler mode, blend weight, actual LUT data, curve metadata and native debug
+values persist in a root-only checksummed file. Writes use fsync and atomic
+rename. First installation attempts to capture existing 0.4.0 tuning. Existing
+settings survive later module updates.
+
+Boot restores data after boot/root in the background, retrying up to five
+minutes. Hook, enable and bypass are never saved or enabled automatically.
+Prepare Hook performs a final restore before the confirmed Runtime restart.
+Invalid saved files prevent that restart; restore stops after manual activation.
+
+Closing the replacement switch preserves tuning. Emergency restore closes the
+gates first, resets/saves native debug defaults and repeats after any in-flight
+edit. Invalid plans fall back to all defaults. All-defaults reset is also added.
+
+The native sampling/LUT arithmetic, bridge and firmware fingerprints remain
+those of 0.4.0. Build and validation are offline; no headset installation,
+runtime parameter changes or device restart were performed.
