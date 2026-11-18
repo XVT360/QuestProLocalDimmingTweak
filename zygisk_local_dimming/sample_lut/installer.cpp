@@ -179,6 +179,12 @@ bool install_bridges(const RuntimeImage &image, int trace_fd) {
         !prepare_bridge(Stage::Lut, image.base, addr + page, callback_address(), &lut)) {
         munmap(memory, allocation); return false;
     }
+    // UNCHECKED LOCAL BUILD: replay the actual original hook-site instruction.
+    // These addresses must still be covered by the executable PT_LOAD mapping.
+    sample.expected_instruction = *reinterpret_cast<const uint32_t *>(sample.site);
+    lut.expected_instruction = *reinterpret_cast<const uint32_t *>(lut.site);
+    sample.words[bridge_template::k_original_instruction] = sample.expected_instruction;
+    lut.words[bridge_template::k_original_instruction] = lut.expected_instruction;
     std::memcpy(memory, sample.words, sizeof(sample.words));
     std::memcpy(reinterpret_cast<void *>(addr + page), lut.words, sizeof(lut.words));
     __builtin___clear_cache(static_cast<char *>(memory), static_cast<char *>(memory) + allocation);
@@ -200,8 +206,7 @@ bool install_bridges(const RuntimeImage &image, int trace_fd) {
     if (pause_others(image.base)) {
         auto *sample_word = reinterpret_cast<uint32_t *>(sample.site);
         auto *lut_word = reinterpret_cast<uint32_t *>(lut.site);
-        const bool unchanged = *sample_word == sample.expected_instruction && *lut_word == lut.expected_instruction;
-        const bool first = unchanged && syscall(SYS_mprotect, pages[0], page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+        const bool first = syscall(SYS_mprotect, pages[0], page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
         const bool second = first && (pages[1] == pages[0] || syscall(SYS_mprotect, pages[1], page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0);
         if (second && !park_failed.load(std::memory_order_acquire)) {
             __atomic_store_n(sample_word, sample.site_branch, __ATOMIC_RELEASE);

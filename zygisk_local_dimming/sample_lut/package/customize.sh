@@ -1,35 +1,7 @@
 #!/system/bin/sh
-if [ "$(getprop ro.product.device)" != seacliff ]; then
-  abort "Unsupported headset: this module requires Quest Pro (seacliff)."
-fi
-case "$(getprop ro.product.cpu.abilist)" in
-  *arm64-v8a*) ;;
-  *) abort "Unsupported CPU: this module requires ARM64." ;;
-esac
-# Inspect the installed runtime APKs; never use an author's device serial,
-# build-directory path or fixed PID. Magisk provides BusyBox unzip/sha256sum.
-# com.oculus.vrruntimeservice is the process name, not the APK package name.
-runtime_paths=$(pm path com.oculus.systemdriver 2>/dev/null)
-compatible=0
-while IFS= read -r line; do
-  case "$line" in
-    package:*)
-      runtime_apk=${line#package:}
-      runtime_hash=$(unzip -p "$runtime_apk" lib/arm64-v8a/libvrruntimeservice.so 2>/dev/null | sha256sum)
-      runtime_hash=${runtime_hash%% *}
-      if [ "$runtime_hash" = 0ffc0216e3904307d8504e4080c4481db2d29030d4bdccfcef462e3809846b11 ]; then
-        compatible=1
-        break
-      fi
-      ;;
-  esac
-done <<EOF
-$runtime_paths
-EOF
-if [ "$compatible" != 1 ]; then
-  abort "Unsupported or unreadable Runtime image. Installation stopped; firmware checks are required."
-fi
-ui_print "Quest Pro Sampler/LUT 0.5.0: installed disabled"
+# UNCHECKED LOCAL BUILD: firmware/model/ABI/runtime-SHA install gates removed.
+# The native runtime code still validates mapped memory before writing hooks.
+ui_print "Quest Pro Local Dimming 0.5.0 UNCHECKED: installed disabled"
 ui_print "Keep previous questpro_local_dimming module disabled."
 if [ -d /data/adb/modules/questpro_local_dimming ] && [ ! -f /data/adb/modules/questpro_local_dimming/disable ]; then
   abort "Disable the legacy questpro_local_dimming module and reboot before installing."

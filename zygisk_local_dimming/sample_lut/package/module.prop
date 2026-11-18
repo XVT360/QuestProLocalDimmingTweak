@@ -1,6 +1,6 @@
 id=questpro_local_dimming_030
-name=Quest Pro Local Dimming Sampler LUT
+name=Quest Pro Local Dimming Sampler LUT (UNCHECKED)
 version=0.5.0
 versionCode=50
 author=Codex
-description=Graphical sampling/LUT/native debug controls with saved tuning; Hook and replacement stay manual.
+description=Experimental unchecked local build. Firmware identity gates removed; v207 offsets still hardcoded. Hook and replacement remain manual.

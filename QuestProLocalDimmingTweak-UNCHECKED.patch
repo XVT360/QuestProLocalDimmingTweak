@@ -1,0 +1,159 @@
+diff --git a/UNCHECKED_PATCH.md b/UNCHECKED_PATCH.md
+new file mode 100644
+index 0000000..3ba0501
+--- /dev/null
++++ b/UNCHECKED_PATCH.md
+@@ -0,0 +1,25 @@
++# UNCHECKED PATCH WARNING
++
++This is an **experimental unchecked local build** of QuestProLocalDimmingTweak
++0.5.0, made at the explicit request of the device owner.
++
++- The installer no longer verifies headset model, ABI, or the runtime library
++  SHA-256 before installation.
++- The native Zygisk library no longer verifies the ELF build ID or the 64-byte
++  hook-site fingerprints of `libvrruntimeservice.so` before installing bridges.
++- Hook-site trampolines replay the instruction actually found at each hook site
++  at install time, instead of a hard-coded v207 opcode.
++
++The build still targets the pinned v207 memory layout (hook sites `0x72e908`
++/ `0x72f930`, resume sites `0x72ec4c` / `0x72fa98`, data at `0xe435d0`),
++because the official release ZIP packages only the compiled library, not a
++rebuilt offset model. If your runtime differs from v207, a mismatch can crash
++`com.oculus.vrruntimeservice`, black-screen the headset, or interrupt
++Virtual Desktop.
++
++The module installs disabled (`hook_mode=0`, `enable=0`, `bypass=1`). Hook and
++replacement activation stay manual and require confirmation. Remaining
++mapped-memory coverage, thread-parking, rollback and emergency-bypass checks
++are intact.
++
++This build is not validated on any headset and is not supported by upstream.
+diff --git a/zygisk_local_dimming/sample_lut/installer.cpp b/zygisk_local_dimming/sample_lut/installer.cpp
+index 430efab..354390d 100644
+--- a/zygisk_local_dimming/sample_lut/installer.cpp
++++ b/zygisk_local_dimming/sample_lut/installer.cpp
+@@ -179,6 +179,12 @@ bool install_bridges(const RuntimeImage &image, int trace_fd) {
+         !prepare_bridge(Stage::Lut, image.base, addr + page, callback_address(), &lut)) {
+         munmap(memory, allocation); return false;
+     }
++    // UNCHECKED LOCAL BUILD: replay the actual original hook-site instruction.
++    // These addresses must still be covered by the executable PT_LOAD mapping.
++    sample.expected_instruction = *reinterpret_cast<const uint32_t *>(sample.site);
++    lut.expected_instruction = *reinterpret_cast<const uint32_t *>(lut.site);
++    sample.words[bridge_template::k_original_instruction] = sample.expected_instruction;
++    lut.words[bridge_template::k_original_instruction] = lut.expected_instruction;
+     std::memcpy(memory, sample.words, sizeof(sample.words));
+     std::memcpy(reinterpret_cast<void *>(addr + page), lut.words, sizeof(lut.words));
+     __builtin___clear_cache(static_cast<char *>(memory), static_cast<char *>(memory) + allocation);
+@@ -200,8 +206,7 @@ bool install_bridges(const RuntimeImage &image, int trace_fd) {
+     if (pause_others(image.base)) {
+         auto *sample_word = reinterpret_cast<uint32_t *>(sample.site);
+         auto *lut_word = reinterpret_cast<uint32_t *>(lut.site);
+-        const bool unchanged = *sample_word == sample.expected_instruction && *lut_word == lut.expected_instruction;
+-        const bool first = unchanged && syscall(SYS_mprotect, pages[0], page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
++        const bool first = syscall(SYS_mprotect, pages[0], page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+         const bool second = first && (pages[1] == pages[0] || syscall(SYS_mprotect, pages[1], page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0);
+         if (second && !park_failed.load(std::memory_order_acquire)) {
+             __atomic_store_n(sample_word, sample.site_branch, __ATOMIC_RELEASE);
+diff --git a/zygisk_local_dimming/sample_lut/package/customize.sh b/zygisk_local_dimming/sample_lut/package/customize.sh
+index acac7d8..5d189bc 100644
+--- a/zygisk_local_dimming/sample_lut/package/customize.sh
++++ b/zygisk_local_dimming/sample_lut/package/customize.sh
+@@ -1,35 +1,7 @@
+ #!/system/bin/sh
+-if [ "$(getprop ro.product.device)" != seacliff ]; then
+-  abort "Unsupported headset: this module requires Quest Pro (seacliff)."
+-fi
+-case "$(getprop ro.product.cpu.abilist)" in
+-  *arm64-v8a*) ;;
+-  *) abort "Unsupported CPU: this module requires ARM64." ;;
+-esac
+-# Inspect the installed runtime APKs; never use an author's device serial,
+-# build-directory path or fixed PID. Magisk provides BusyBox unzip/sha256sum.
+-# com.oculus.vrruntimeservice is the process name, not the APK package name.
+-runtime_paths=$(pm path com.oculus.systemdriver 2>/dev/null)
+-compatible=0
+-while IFS= read -r line; do
+-  case "$line" in
+-    package:*)
+-      runtime_apk=${line#package:}
+-      runtime_hash=$(unzip -p "$runtime_apk" lib/arm64-v8a/libvrruntimeservice.so 2>/dev/null | sha256sum)
+-      runtime_hash=${runtime_hash%% *}
+-      if [ "$runtime_hash" = 0ffc0216e3904307d8504e4080c4481db2d29030d4bdccfcef462e3809846b11 ]; then
+-        compatible=1
+-        break
+-      fi
+-      ;;
+-  esac
+-done <<EOF
+-$runtime_paths
+-EOF
+-if [ "$compatible" != 1 ]; then
+-  abort "Unsupported or unreadable Runtime image. Installation stopped; firmware checks are required."
+-fi
+-ui_print "Quest Pro Sampler/LUT 0.5.0: installed disabled"
++# UNCHECKED LOCAL BUILD: firmware/model/ABI/runtime-SHA install gates removed.
++# The native runtime code still validates mapped memory before writing hooks.
++ui_print "Quest Pro Local Dimming 0.5.0 UNCHECKED: installed disabled"
+ ui_print "Keep previous questpro_local_dimming module disabled."
+ if [ -d /data/adb/modules/questpro_local_dimming ] && [ ! -f /data/adb/modules/questpro_local_dimming/disable ]; then
+   abort "Disable the legacy questpro_local_dimming module and reboot before installing."
+diff --git a/zygisk_local_dimming/sample_lut/package/module.prop b/zygisk_local_dimming/sample_lut/package/module.prop
+index 2d4b59d..acfe9c1 100644
+--- a/zygisk_local_dimming/sample_lut/package/module.prop
++++ b/zygisk_local_dimming/sample_lut/package/module.prop
+@@ -1,6 +1,6 @@
+ id=questpro_local_dimming_030
+-name=Quest Pro Local Dimming Sampler LUT
++name=Quest Pro Local Dimming Sampler LUT (UNCHECKED)
+ version=0.5.0
+ versionCode=50
+ author=Codex
+-description=Graphical sampling/LUT/native debug controls with saved tuning; Hook and replacement stay manual.
++description=Experimental unchecked local build. Firmware identity gates removed; v207 offsets still hardcoded. Hook and replacement remain manual.
+diff --git a/zygisk_local_dimming/sample_lut/runtime.cpp b/zygisk_local_dimming/sample_lut/runtime.cpp
+index cad8520..e9c5abb 100644
+--- a/zygisk_local_dimming/sample_lut/runtime.cpp
++++ b/zygisk_local_dimming/sample_lut/runtime.cpp
+@@ -136,29 +136,8 @@ uint32_t dispatch(SavedContext *ctx, uint32_t stage, uintptr_t base) noexcept {
+     return static_cast<uint32_t>(route);
+ }
+ 
+-bool note_id(const dl_phdr_info *info) {
+-    for (size_t i = 0; i < info->dlpi_phnum; ++i) {
+-        const auto &ph = info->dlpi_phdr[i];
+-        if (ph.p_type != PT_NOTE || ph.p_filesz > 65536) continue;
+-        const uint8_t *p = reinterpret_cast<const uint8_t *>(info->dlpi_addr + ph.p_vaddr);
+-        size_t offset = 0;
+-        while (offset + sizeof(Elf64_Nhdr) <= ph.p_filesz) {
+-            Elf64_Nhdr note;
+-            std::memcpy(&note, p + offset, sizeof(note));
+-            offset += sizeof(note);
+-            const size_t names = (static_cast<size_t>(note.n_namesz) + 3) & ~size_t{3};
+-            const size_t descs = (static_cast<size_t>(note.n_descsz) + 3) & ~size_t{3};
+-            if (names > ph.p_filesz - offset || descs > ph.p_filesz - offset - names) break;
+-            if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4 &&
+-                note.n_descsz == sizeof(kBuildId) && std::memcmp(p + offset, "GNU", 4) == 0 &&
+-                std::memcmp(p + offset + names, kBuildId, sizeof(kBuildId)) == 0) return true;
+-            offset += names + descs;
+-        }
+-    }
+-    return false;
+-}
+ int inspect(dl_phdr_info *info, size_t, void *opaque) {
+-    if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libvrruntimeservice.so") || !note_id(info)) return 0;
++    if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libvrruntimeservice.so")) return 0;
+     const uintptr_t base = info->dlpi_addr;
+     bool code = false, data = false;
+     for (size_t i = 0; i < info->dlpi_phnum; ++i) {
+@@ -169,8 +148,7 @@ int inspect(dl_phdr_info *info, size_t, void *opaque) {
+         if ((p.p_flags & (PF_R | PF_W)) == (PF_R | PF_W) &&
+             p.p_vaddr <= 0xe435d0 && p.p_vaddr + p.p_memsz >= 0xe46c88) data = true;
+     }
+-    if (!code || !data || std::memcmp(reinterpret_cast<void *>(base + 0x72e908), kSampleFingerprint, 64) ||
+-        std::memcmp(reinterpret_cast<void *>(base + 0x72f930), kLutFingerprint, 64)) return 0;
++    if (!code || !data) return 0;
+     static_cast<RuntimeImage *>(opaque)->base = base;
+     return 1;
+ }

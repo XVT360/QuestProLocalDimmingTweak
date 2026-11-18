@@ -136,29 +136,8 @@ uint32_t dispatch(SavedContext *ctx, uint32_t stage, uintptr_t base) noexcept {
     return static_cast<uint32_t>(route);
 }
 
-bool note_id(const dl_phdr_info *info) {
-    for (size_t i = 0; i < info->dlpi_phnum; ++i) {
-        const auto &ph = info->dlpi_phdr[i];
-        if (ph.p_type != PT_NOTE || ph.p_filesz > 65536) continue;
-        const uint8_t *p = reinterpret_cast<const uint8_t *>(info->dlpi_addr + ph.p_vaddr);
-        size_t offset = 0;
-        while (offset + sizeof(Elf64_Nhdr) <= ph.p_filesz) {
-            Elf64_Nhdr note;
-            std::memcpy(&note, p + offset, sizeof(note));
-            offset += sizeof(note);
-            const size_t names = (static_cast<size_t>(note.n_namesz) + 3) & ~size_t{3};
-            const size_t descs = (static_cast<size_t>(note.n_descsz) + 3) & ~size_t{3};
-            if (names > ph.p_filesz - offset || descs > ph.p_filesz - offset - names) break;
-            if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4 &&
-                note.n_descsz == sizeof(kBuildId) && std::memcmp(p + offset, "GNU", 4) == 0 &&
-                std::memcmp(p + offset + names, kBuildId, sizeof(kBuildId)) == 0) return true;
-            offset += names + descs;
-        }
-    }
-    return false;
-}
 int inspect(dl_phdr_info *info, size_t, void *opaque) {
-    if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libvrruntimeservice.so") || !note_id(info)) return 0;
+    if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libvrruntimeservice.so")) return 0;
     const uintptr_t base = info->dlpi_addr;
     bool code = false, data = false;
     for (size_t i = 0; i < info->dlpi_phnum; ++i) {
@@ -169,8 +148,7 @@ int inspect(dl_phdr_info *info, size_t, void *opaque) {
         if ((p.p_flags & (PF_R | PF_W)) == (PF_R | PF_W) &&
             p.p_vaddr <= 0xe435d0 && p.p_vaddr + p.p_memsz >= 0xe46c88) data = true;
     }
-    if (!code || !data || std::memcmp(reinterpret_cast<void *>(base + 0x72e908), kSampleFingerprint, 64) ||
-        std::memcmp(reinterpret_cast<void *>(base + 0x72f930), kLutFingerprint, 64)) return 0;
+    if (!code || !data) return 0;
     static_cast<RuntimeImage *>(opaque)->base = base;
     return 1;
 }
