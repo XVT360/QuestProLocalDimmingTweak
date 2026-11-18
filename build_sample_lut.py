@@ -12,44 +12,76 @@ VERSION = '0.5.0'
 SOURCE = ROOT / 'zygisk_local_dimming'
 NATIVE = SOURCE / 'sample_lut'
 SO = Path(os.environ['QUEST_LD_RUNTIME_IMAGE']).resolve() if os.environ.get('QUEST_LD_RUNTIME_IMAGE') else None
-PIN = '0ffc0216e3904307d8504e4080c4481db2d29030d4bdccfcef462e3809846b11'
 NDK = Path(os.environ.get('ANDROID_NDK_HOME', ROOT / '.build-deps/android-ndk-r27d')).resolve()
 BUILD = ROOT / 'sample_lut_build'
 
+# Every Runtime image this module is reviewed against. One generated header per
+# image pins its identity (SHA256, ELF build-id, hook-site fingerprints); the
+# address fields are reviewed evidence from that same image. runtime_profile.cpp
+# compiles them into a table and selects a profile from the loaded library's
+# build-id. An image outside this list is still refused, never patched.
+PROFILES = [
+    dict(key='v207', vros_build=207, header='pinned_image.h',
+         symbols=('kBuildId', 'kSampleFingerprint', 'kLutFingerprint', 'kPinnedSha256'),
+         sha='0ffc0216e3904307d8504e4080c4481db2d29030d4bdccfcef462e3809846b11',
+         sample=0x72e908, lut=0x72f930),
+    dict(key='v204', vros_build=204, header='pinned_image_v204.h',
+         symbols=('kBuildIdV204', 'kSampleFingerprintV204', 'kLutFingerprintV204', 'kPinnedSha256V204'),
+         sha='840cb7661532ff53a40387cfb17a5c89ccdb114bc9231149b84e5df0e826ef1a',
+         sample=0x7133cc, lut=0x7143f4),
+]
 
-def generate_identity():
-    if SO is None:
-        header = (NATIVE / 'pinned_image.h').read_text(encoding='ascii')
-        if f'kModuleVersion = "{VERSION}"' not in header or PIN not in header:
-            raise RuntimeError('Pinned header/version mismatch; set QUEST_LD_RUNTIME_IMAGE to revalidate')
-        print('Compiling with reviewed pinned header; original firmware is not being revalidated')
-        return
-    from elftools.elf.elffile import ELFFile
-    if hashlib.sha256(SO.read_bytes()).hexdigest() != PIN:
-        raise RuntimeError('Unsupported runtime image; SHA256 must match the supported firmware')
-    with SO.open('rb') as file:
-        elf = ELFFile(file)
-        notes = elf.get_section_by_name('.note.gnu.build-id')
-        build_id = bytes.fromhex(next(n['n_desc'] for n in notes.iter_notes() if n['n_type'] == 'NT_GNU_BUILD_ID'))
-        segments = list(elf.iter_segments())
-        def read_va(va, size):
-            for p in segments:
-                if p['p_type'] == 'PT_LOAD' and p['p_vaddr'] <= va and va + size <= p['p_vaddr'] + p['p_filesz']:
-                    file.seek(p['p_offset'] + va - p['p_vaddr'])
-                    return file.read(size)
-            raise ValueError(hex(va))
-        lines = ['// Generated from the pinned original image by build_sample_lut.py.',
-                 '#pragma once', '#include <cstdint>', 'namespace quest_ld {',
-                 'constexpr uint8_t kBuildId[] = {' + ','.join(str(b) for b in build_id) + '};',
-                 f'constexpr const char *kModuleVersion = "{VERSION}";']
-        for name, at in [('Sample', 0x72e908), ('Lut', 0x72f930)]:
-            lines.append(f'constexpr uint8_t k{name}Fingerprint[] = {{' + ','.join(str(b) for b in read_va(at, 64)) + '};')
-        lines += [f'constexpr const char *kPinnedSha256 = "{PIN}";', '}']
-        (NATIVE / 'pinned_image.h').write_text('\n'.join(lines)+'\n', encoding='ascii')
+
+def generate_identity(image=None):
+    selected = None
+    if image is not None:
+        digest = hashlib.sha256(image.read_bytes()).hexdigest()
+        selected = next((p for p in PROFILES if p['sha'] == digest), None)
+        if selected is None:
+            raise RuntimeError('Unsupported runtime image; SHA256 must match a supported firmware')
+    for profile in PROFILES:
+        header_path = NATIVE / profile['header']
+        if profile is not selected:
+            header = header_path.read_text(encoding='ascii')
+            build_id, sample_fp, lut_fp, pinned = profile['symbols']
+            if profile['sha'] not in header:
+                raise RuntimeError(f'Pinned header {profile["header"]} does not pin its reviewed SHA256')
+            for symbol in (build_id, sample_fp, lut_fp, pinned):
+                if symbol not in header:
+                    raise RuntimeError(f'Pinned header {profile["header"]} is missing {symbol}')
+            continue
+        from elftools.elf.elffile import ELFFile
+        with image.open('rb') as file:
+            elf = ELFFile(file)
+            notes = elf.get_section_by_name('.note.gnu.build-id')
+            build_id = bytes.fromhex(next(n['n_desc'] for n in notes.iter_notes() if n['n_type'] == 'NT_GNU_BUILD_ID'))
+            segments = list(elf.iter_segments())
+            def read_va(va, size):
+                for p in segments:
+                    if p['p_type'] == 'PT_LOAD' and p['p_vaddr'] <= va and va + size <= p['p_vaddr'] + p['p_filesz']:
+                        file.seek(p['p_offset'] + va - p['p_vaddr'])
+                        return file.read(size)
+                raise ValueError(hex(va))
+            build_symbol, sample_symbol, lut_symbol, pinned_symbol = profile['symbols']
+            lines = ['// Generated from the pinned original image by build_sample_lut.py.',
+                     '#pragma once', '#include <cstdint>', 'namespace quest_ld {',
+                     f'constexpr uint8_t {build_symbol}[] = {{' + ','.join(str(b) for b in build_id) + '};']
+            lines.append(f'constexpr uint8_t {sample_symbol}[] = {{' + ','.join(str(b) for b in read_va(profile['sample'], 64)) + '};')
+            lines.append(f'constexpr uint8_t {lut_symbol}[] = {{' + ','.join(str(b) for b in read_va(profile['lut'], 64)) + '};')
+            lines += [f'constexpr const char *{pinned_symbol} = "{profile["sha"]}";', '}']
+        with header_path.open('w', encoding='ascii', newline='\n') as header_file:
+            header_file.write('\n'.join(lines)+'\n')
+    module_version = (NATIVE / 'runtime_profile.h').read_text(encoding='ascii')
+    if f'kModuleVersion = "{VERSION}"' not in module_version:
+        raise RuntimeError('runtime_profile.h/version mismatch; set QUEST_LD_RUNTIME_IMAGE to revalidate')
+    if selected is None:
+        print('Compiling with reviewed pinned headers; original firmware is not being revalidated')
+    else:
+        print(f'Revalidated pinned identity for {selected["key"]} from the supplied runtime image')
 
 
 def build():
-    generate_identity()
+    generate_identity(SO)
     BUILD.mkdir(exist_ok=True)
     ndk_build = NDK / ('ndk-build.cmd' if os.name == 'nt' else 'ndk-build')
     if not ndk_build.is_file():
@@ -104,7 +136,7 @@ def package():
         if file.is_file():
             entries['source/' + file.relative_to(ROOT).as_posix()] = file
     for name in ['native_reference.js', 'native_reference.test.js', 'sample_lut_reference.js',
-                 'sample_lut_reference.test.js', 'native_oracle.py', 'sample_lut_oracle.py',
+                 'sample_lut_reference.test.js', 'runtime_images.py', 'native_oracle.py', 'sample_lut_oracle.py',
                  'stage_bridge_oracle.py', 'bridge_integration_oracle.py', 'compiled_sample_lut_oracle.py',
                  'requirements-dev.txt', '.gitattributes', '.gitignore', 'AGENTS.md']:
         entries['source/' + name] = ROOT / name
@@ -130,7 +162,9 @@ def package():
 
 
 if __name__ == '__main__':
-    if '--package' in sys.argv:
+    if '--identity' in sys.argv:
+        generate_identity(SO)
+    elif '--package' in sys.argv:
         package()
     else:
         build()

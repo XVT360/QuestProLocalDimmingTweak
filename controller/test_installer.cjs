@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const bash = process.env.QUEST_LD_BASH || (process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash');
 const unix = p => p.replaceAll('\\', '/').replace(/^([A-Z]):/i, (_, d) => '/' + d.toLowerCase());
 const hash = '0ffc0216e3904307d8504e4080c4481db2d29030d4bdccfcef462e3809846b11';
+const hashV204 = '840cb7661532ff53a40387cfb17a5c89ccdb114bc9231149b84e5df0e826ef1a';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'quest-ld-install-'));
 const script = path.join(temp, 'customize.sh');
 fs.copyFileSync('zygisk_local_dimming/sample_lut/package/customize.sh', script);
@@ -59,7 +60,13 @@ assert.equal(fresh.status,0,fresh.stderr);
 assert.match(fresh.stdout,/Graphical controller installed/);
 assert.match(fresh.calls,/pm:path com.oculus.systemdriver/);
 assert.match(fresh.calls,/ldctl:save/);
-for (const options of [{DEVICE:'other-headset'}, {ABI:'armeabi-v7a'}, {HASH:'unsupported'}, {MISSING:'1'}]) {
+// Every reviewed Runtime image is accepted; an unlisted or near-miss hash is not.
+const second = run({HASH:hashV204});
+assert.equal(second.status,0,second.stderr);
+assert.match(second.calls,/pm:path com.oculus.systemdriver/);
+assert.match(second.calls,/ldctl:save/);
+for (const options of [{DEVICE:'other-headset'}, {ABI:'armeabi-v7a'}, {HASH:'unsupported'},
+    {HASH:hashV204.slice(0,-1)+'b'}, {MISSING:'1'}]) {
   const denied = run(options);
   assert.equal(denied.status,23);
   assert.doesNotMatch(denied.calls,/ldctl:|pm:install/);
@@ -71,4 +78,4 @@ const copyFailed = run({APK_RESULT:'1', COPY_RESULT:'1'});
 assert.equal(copyFailed.status,0);
 assert.match(copyFailed.stdout,/from the module ZIP manually/);
 assert.doesNotMatch(copyFailed.stdout,/Controller APK copied to Download/);
-console.log('Installer: 7 scenarios passed; Android, package extraction and filesystem operations mocked');
+console.log('Installer: 9 scenarios passed; Android, package extraction and filesystem operations mocked');

@@ -44,3 +44,6 @@ tombstone_*
 *_disasm.txt
 *_trace*.txt
 crash_*.txt
+
+# build outputs of the release flow
+*.zip.sha256

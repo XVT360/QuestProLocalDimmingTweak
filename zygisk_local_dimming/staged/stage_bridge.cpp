@@ -21,19 +21,19 @@ bool direct_branch(uintptr_t source, uintptr_t destination, uint32_t *word) noex
 }
 } // namespace
 
-bool prepare_bridge(Stage stage, uintptr_t image, uintptr_t bridge_address,
-                    uintptr_t callback, PreparedBridge *out) noexcept {
+bool prepare_bridge(Stage stage, const RuntimeProfile &profile, uintptr_t image,
+                    uintptr_t bridge_address, uintptr_t callback, PreparedBridge *out) noexcept {
     using namespace bridge_template;
     if (!out || !image || !bridge_address || !callback ||
         ((image | bridge_address | callback) & 3u) ||
-        image > UINTPTR_MAX - 0xe46c88 ||
+        image > UINTPTR_MAX - profile.data_high ||
         bridge_address > UINTPTR_MAX - sizeof(kWords)) return false;
     uintptr_t entry, resume;
     uint32_t instruction;
     if (stage == Stage::Sample) {
-        entry = 0x72e908; resume = 0x72ec4c; instruction = 0x1e249000;
+        entry = profile.sample_entry; resume = profile.sample_resume; instruction = profile.sample_instruction;
     } else if (stage == Stage::Lut) {
-        entry = 0x72f930; resume = 0x72fa98; instruction = 0x1e2e1000;
+        entry = profile.lut_entry; resume = profile.lut_resume; instruction = profile.lut_instruction;
     } else {
         return false;
     }

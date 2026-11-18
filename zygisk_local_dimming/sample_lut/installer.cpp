@@ -92,7 +92,7 @@ bool task_list(int *ids, size_t *count) {
     return good;
 }
 
-bool pause_others(uintptr_t base) {
+bool pause_others(uintptr_t base, const RuntimeProfile &profile) {
     int tids[kThreads];
     size_t count;
     const int own = static_cast<int>(syscall(SYS_gettid));
@@ -133,7 +133,7 @@ bool pause_others(uintptr_t base) {
     }
     for (size_t i = 0; i < parked_count; ++i) {
         const uintptr_t pc = parked[i].pc;
-        if (pc >= base + 0x72e8a4 && pc < base + 0x73027c) {
+        if (pc >= base + profile.pause_low && pc < base + profile.pause_high) {
             release_threads(); return false;
         }
     }
@@ -169,14 +169,16 @@ void *allocate_near(uintptr_t site, size_t bytes, size_t page) {
 } // namespace
 
 bool install_bridges(const RuntimeImage &image, int trace_fd) {
+    if (!image.base || !image.profile) return false;
+    const RuntimeProfile &profile = *image.profile;
     const size_t page = static_cast<size_t>(getpagesize());
     const size_t allocation = page * 2;
-    void *memory = allocate_near(image.base + 0x72e908, allocation, page);
+    void *memory = allocate_near(image.base + profile.sample_entry, allocation, page);
     if (!memory) { if (trace_fd >= 0) dprintf(trace_fd, "hook_refused reason=near_allocation\n"); return false; }
     PreparedBridge sample, lut;
     const uintptr_t addr = reinterpret_cast<uintptr_t>(memory);
-    if (!prepare_bridge(Stage::Sample, image.base, addr, callback_address(), &sample) ||
-        !prepare_bridge(Stage::Lut, image.base, addr + page, callback_address(), &lut)) {
+    if (!prepare_bridge(Stage::Sample, profile, image.base, addr, callback_address(), &sample) ||
+        !prepare_bridge(Stage::Lut, profile, image.base, addr + page, callback_address(), &lut)) {
         munmap(memory, allocation); return false;
     }
     std::memcpy(memory, sample.words, sizeof(sample.words));
@@ -197,7 +199,7 @@ bool install_bridges(const RuntimeImage &image, int trace_fd) {
     // to its default terminating action when a thread eventually unmasks it.
     const uintptr_t pages[2] = {sample.site & ~(page - 1), lut.site & ~(page - 1)};
     bool installed = false;
-    if (pause_others(image.base)) {
+    if (pause_others(image.base, profile)) {
         auto *sample_word = reinterpret_cast<uint32_t *>(sample.site);
         auto *lut_word = reinterpret_cast<uint32_t *>(lut.site);
         const bool unchanged = *sample_word == sample.expected_instruction && *lut_word == lut.expected_instruction;
@@ -218,7 +220,7 @@ bool install_bridges(const RuntimeImage &image, int trace_fd) {
         }
         const bool protected1 = !first || syscall(SYS_mprotect, pages[0], page, PROT_READ | PROT_EXEC) == 0;
         const bool protected2 = !second || pages[1] == pages[0] || syscall(SYS_mprotect, pages[1], page, PROT_READ | PROT_EXEC) == 0;
-        if (installed && protected1 && protected2) runtime_ready(image.base);
+        if (installed && protected1 && protected2) runtime_ready(image.base, image.profile);
         else if (installed) {
             // Bridges stay mapped and bypassed. Do not free code still referenced
             // by a patched branch; report refusal until a fresh process starts.

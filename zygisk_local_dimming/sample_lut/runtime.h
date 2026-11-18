@@ -1,12 +1,13 @@
 #pragma once
+#include "runtime_profile.h"
 #include <cstdint>
 #include <cstddef>
 
 namespace quest_ld {
-struct RuntimeImage { uintptr_t base = 0; };
+struct RuntimeImage { uintptr_t base = 0; const RuntimeProfile *profile = nullptr; };
 bool find_image(RuntimeImage *out);
 bool install_bridges(const RuntimeImage &image, int trace_fd);
 void *runtime_worker(void *fd_value);
-void runtime_ready(uintptr_t base);
+void runtime_ready(uintptr_t base, const RuntimeProfile *profile);
 uintptr_t callback_address();
 } // namespace quest_ld

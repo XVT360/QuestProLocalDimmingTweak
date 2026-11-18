@@ -9,6 +9,11 @@ esac
 # Inspect the installed runtime APKs; never use an author's device serial,
 # build-directory path or fixed PID. Magisk provides BusyBox unzip/sha256sum.
 # com.oculus.vrruntimeservice is the process name, not the APK package name.
+# Reviewed Runtime images. Each entry is the full-image SHA256 that the native
+# profile table pins, so an unlisted firmware aborts here instead of installing.
+#   v207  0ffc0216...6b11
+#   v204  840cb766...ef1a
+supported_hashes='0ffc0216e3904307d8504e4080c4481db2d29030d4bdccfcef462e3809846b11 840cb7661532ff53a40387cfb17a5c89ccdb114bc9231149b84e5df0e826ef1a'
 runtime_paths=$(pm path com.oculus.systemdriver 2>/dev/null)
 compatible=0
 while IFS= read -r line; do
@@ -17,10 +22,9 @@ while IFS= read -r line; do
       runtime_apk=${line#package:}
       runtime_hash=$(unzip -p "$runtime_apk" lib/arm64-v8a/libvrruntimeservice.so 2>/dev/null | sha256sum)
       runtime_hash=${runtime_hash%% *}
-      if [ "$runtime_hash" = 0ffc0216e3904307d8504e4080c4481db2d29030d4bdccfcef462e3809846b11 ]; then
-        compatible=1
-        break
-      fi
+      case " $supported_hashes " in
+        *" $runtime_hash "*) compatible=1; break ;;
+      esac
       ;;
   esac
 done <<EOF

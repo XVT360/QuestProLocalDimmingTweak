@@ -1,7 +1,7 @@
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 LOCAL_MODULE := questpro_sample_lut
-LOCAL_SRC_FILES := module.cpp runtime.cpp installer.cpp control.cpp ../staged/sample_lut_core.cpp ../staged/stage_controller.cpp ../staged/stage_bridge.cpp
+LOCAL_SRC_FILES := module.cpp runtime.cpp runtime_profile.cpp installer.cpp control.cpp ../staged/sample_lut_core.cpp ../staged/stage_controller.cpp ../staged/stage_bridge.cpp
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/../native $(LOCAL_PATH)/../staged
 LOCAL_CPPFLAGS := -std=c++17 -O2 -fvisibility=hidden -fno-exceptions -fno-rtti -ffp-contract=off -fno-fast-math
 LOCAL_CFLAGS := -Wall -Wextra -Werror

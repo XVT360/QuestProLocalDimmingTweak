@@ -10,7 +10,7 @@ import random
 import struct
 import subprocess
 
-from native_oracle import Oracle, ROOT, SO, B, RAW, SCRATCH, b64, pack, regs
+from native_oracle import Oracle, ROOT, SO, B, RAW, SCRATCH, b64, pack, regs, PROFILE, X20
 from sample_lut_oracle import (set_state, set_table, original_frame, active_bytes,
                                SAMPLE_ENTRY, SAMPLE_EXIT, LUT_ENTRY, LUT_EXIT, LUT)
 from stage_bridge_oracle import template, instantiate_at, branch
@@ -67,7 +67,7 @@ def generate():
                             assert struct.unpack('<Q', uc.mem_read(context+19*8, 8))[0] == RAW
                             if plan.get('enabled') and plan.get('sampler', 'native') != 'native':
                                 uc.mem_write(B+0x60+before['selector']*0x1200, active_bytes(expected['sampled']))
-                                uc.mem_write(context+20*8, struct.pack('<Q', 0xe45000))
+                                uc.mem_write(context+20*8, struct.pack('<Q', X20))
                                 uc.mem_write(context+27*8, struct.pack('<Q', B))
                                 route = 1
                         else:

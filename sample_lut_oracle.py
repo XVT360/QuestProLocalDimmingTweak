@@ -14,12 +14,17 @@ import random
 import struct
 import subprocess
 
-from native_oracle import Oracle, ROOT, SO, B, RAW, HISTORY, SCRATCH, SP, LUT, b64, pack, regs
+from native_oracle import (Oracle, ROOT, SO, B, RAW, HISTORY, SCRATCH, SP, LUT, b64, pack, regs,
+                            PROFILE, CODE, HEADER, X20, STRIDE, RAW_PTR, MODE4)
 from unicorn import UC_HOOK_CODE
 
-SAMPLE_ENTRY, SAMPLE_EXIT = 0x72e908, 0x72ec4c
-LUT_ENTRY, LUT_EXIT = 0x72f930, 0x72fa98
-RETURN = 0x730278
+SAMPLE_ENTRY, SAMPLE_EXIT = CODE['sample']
+LUT_ENTRY, LUT_EXIT = CODE['lut']
+RETURN = PROFILE['return_addr']
+ORIGINAL_START = CODE['original'][0]
+NATIVE_TEXT = PROFILE['native_text']
+WRITE_SITES = PROFILE['write_sites']
+TRACE_CALLS = PROFILE['trace_calls']
 PAIR_BYTES = 0x1200
 
 
@@ -42,8 +47,8 @@ def set_table(oracle, table):
     # with module table values. The device integration must NEVER swap this
     # native vector from a watcher thread.
     oracle.uc.mem_write(SCRATCH + 0x1000, struct.pack('<%dH' % len(table), *table))
-    oracle.u64(0xe46bf0, SCRATCH + 0x1000)
-    oracle.u64(0xe46bf8, SCRATCH + 0x1000 + 2 * len(table))
+    oracle.u64(HEADER, SCRATCH + 0x1000)
+    oracle.u64(HEADER + 8, SCRATCH + 0x1000 + 2 * len(table))
 
 
 def original_frame(oracle, raw, stride, config, trace):
@@ -57,17 +62,18 @@ def original_frame(oracle, raw, stride, config, trace):
     caller_d = {i: oracle.uc.reg_read(getattr(regs, 'UC_ARM64_REG_D' + str(i))) for i in range(8, 16)}
     oracle.config(**config)
     oracle.uc.mem_write(RAW, raw)
-    oracle.i32(0xe435d0, stride)
-    oracle.u64(0xe435d8, RAW)
-    oracle.i32(0xe46c68, 0) # excludes the runtime's optional mode-4 dump path
+    oracle.i32(STRIDE, stride)
+    oracle.u64(RAW_PTR, RAW)
+    oracle.i32(MODE4, 0) # excludes the runtime's optional mode-4 dump path
     oracle.uc.mem_write(SCRATCH + 3, bytes([int(trace)]))
     trace_calls = []
     def log_shim(uc, address, size, user):
         trace_calls.append(uc.reg_read(regs.UC_ARM64_REG_LR))
         oracle.reg('pc', uc.reg_read(regs.UC_ARM64_REG_LR))
-    hook = oracle.uc.hook_add(UC_HOOK_CODE, log_shim, begin=0x3fa14c, end=0x3fa14c)
+    log_site = PROFILE['log_site']
+    hook = oracle.uc.hook_add(UC_HOOK_CODE, log_shim, begin=log_site, end=log_site)
     try:
-        oracle.execute(0x72e8a4, RETURN)
+        oracle.execute(ORIGINAL_START, RETURN)
     finally:
         oracle.uc.hook_del(hook)
     assert oracle.uc.reg_read(regs.UC_ARM64_REG_SP) == SP
@@ -76,13 +82,13 @@ def original_frame(oracle, raw, stride, config, trace):
     for i, expected in caller_d.items():
         assert oracle.uc.reg_read(getattr(regs, 'UC_ARM64_REG_D' + str(i))) == expected, ('callee d', i)
     if trace:
-        assert 0x7302ec in trace_calls and 0x730324 in trace_calls
+        assert TRACE_CALLS[0] in trace_calls and TRACE_CALLS[1] in trace_calls
     return oracle.state(), len(trace_calls)
 
 
 def generate():
-    pinned = '0ffc0216e3904307d8504e4080c4481db2d29030d4bdccfcef462e3809846b11'
-    assert hashlib.sha256(SO.read_bytes()).hexdigest() == pinned
+    pinned = PROFILE['sha256']
+    assert hashlib.sha256(SO.read_bytes()).hexdigest() == pinned, 'image does not match the selected profile'
     oracle_lut = Oracle()
     def curve(threshold, gamma):
         return list(struct.unpack('<%dH' % (threshold + 1), oracle_lut.generate_lut(threshold, gamma)))
@@ -152,13 +158,13 @@ def generate():
                                          active_bytes(expected['sampled']))
                             # These are established by the skipped native sampler
                             # and read later. Restoring only entry registers fails.
-                            actual.reg('x20', 0xe45000)
+                            actual.reg('x20', X20)
                             actual.reg('x27', B)
                             actual.reg('pc', SAMPLE_EXIT)
                     def sampling_exit(uc, address, size, user):
                         visits['sample_exit'] += 1
                         assert actual.state() == expected['sampled'], name + ' sample state'
-                        assert uc.reg_read(regs.UC_ARM64_REG_X20) == 0xe45000
+                        assert uc.reg_read(regs.UC_ARM64_REG_X20) == X20
                         assert uc.reg_read(regs.UC_ARM64_REG_X27) == B
                     def lut_entry(uc, address, size, user):
                         visits['lut_entry'] += 1
@@ -175,15 +181,15 @@ def generate():
                                          active_bytes(expected['after']))
                             actual.reg('pc', LUT_EXIT)
                     def count_store(uc, address, size, user):
-                        visits['sample_writes' if address in [0x72ea90, 0x72ec2c] else 'lut_writes'] += 1
-                    for at, callback in [(SAMPLE_ENTRY, sampling_entry), (SAMPLE_EXIT, sampling_exit), (LUT_ENTRY, lut_entry),
-                                         (0x72ea90, count_store), (0x72ec2c, count_store),
-                                         (0x72f99c, count_store), (0x72fa4c, count_store)]:
+                        visits['sample_writes' if address in WRITE_SITES[:2] else 'lut_writes'] += 1
+                    sites = [(SAMPLE_ENTRY, sampling_entry), (SAMPLE_EXIT, sampling_exit), (LUT_ENTRY, lut_entry)]
+                    sites += [(site, count_store) for site in WRITE_SITES]
+                    for at, callback in sites:
                         hooks.append(actual.uc.hook_add(UC_HOOK_CODE, callback, begin=at, end=at))
                     set_table(actual, table)
-                    native_header = bytes(actual.uc.mem_read(0xe46bf0, 16))
+                    native_header = bytes(actual.uc.mem_read(HEADER, 16))
                     native_table = bytes(actual.uc.mem_read(SCRATCH + 0x1000, len(table) * 2))
-                    native_text = bytes(actual.uc.mem_read(0x72e8a4, 0x73027c - 0x72e8a4))
+                    native_text = bytes(actual.uc.mem_read(NATIVE_TEXT[0], NATIVE_TEXT[1] - NATIVE_TEXT[0]))
                     try:
                         state, trace_calls = original_frame(actual, bytes(raw), stride, original, trace)
                     finally:
@@ -193,9 +199,9 @@ def generate():
                     assert visits == dict(sample_entry=1, sample_exit=1, lut_entry=1,
                                           sample_writes=0 if sample_replace else 1152,
                                           lut_writes=0 if lut_replace else 1152), visits
-                    assert bytes(actual.uc.mem_read(0xe46bf0, 16)) == native_header
+                    assert bytes(actual.uc.mem_read(HEADER, 16)) == native_header
                     assert bytes(actual.uc.mem_read(SCRATCH + 0x1000, len(table) * 2)) == native_table
-                    assert bytes(actual.uc.mem_read(0x72e8a4, len(native_text))) == native_text
+                    assert bytes(actual.uc.mem_read(NATIVE_TEXT[0], len(native_text))) == native_text
                     neutral = (not plan.get('enabled', False) or
                                (plan.get('sampler', 'native') in ['mean', 'native'] and
                                 plan.get('lut', table) == table))
@@ -233,7 +239,7 @@ def generate():
     report = dict(runtime_sha256=pinned, cases=len(records),
                   neutral_cases=sum(r['native_baseline_compared'] for r in records),
                   boundary_contract=dict(sample_entry=hex(SAMPLE_ENTRY), sample_resume=hex(SAMPLE_EXIT),
-                                         sample_live_out={'x20': 'image_base+0xe45000', 'x27': 'image_base+0xe43588'},
+                                         sample_live_out={'x20': f'image_base+{X20:#x}', 'x27': f'image_base+{B:#x}'},
                                          lut_entry=hex(LUT_ENTRY), lut_resume=hex(LUT_EXIT)),
                   scope='Original middle stages, native LUT oracle, function epilogue and output encoder. Replacement arithmetic supplied by JS. Trace logger shimmed. No C++ build or bridge execution.',
                   source_sha256={name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in
