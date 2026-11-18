@@ -1,6 +1,6 @@
 #include "runtime.h"
 #include "control.h"
-#include "pinned_image.h"
+#include "runtime_profile.h"
 #include "stage_bridge.h"
 #include "stage_controller.h"
 #include "range_view.h"
@@ -18,6 +18,7 @@ namespace quest_ld {
 namespace {
 PlanMailbox mailbox;
 std::atomic<uintptr_t> ready_base{0};
+std::atomic<const RuntimeProfile *> ready_profile{nullptr};
 std::atomic<uint64_t> samples{0}, luts{0}, rejected{0}, hits{0};
 struct RangeCache {
     std::atomic_flag lock = ATOMIC_FLAG_INIT;
@@ -52,18 +53,18 @@ void refresh_ranges() {
     ranges.lock.clear(std::memory_order_release);
 }
 
-bool views(uintptr_t base, uintptr_t input, RawView *raw, PairView *pair, bool sample) {
+bool views(const RuntimeProfile &profile, uintptr_t base, uintptr_t input, RawView *raw, PairView *pair, bool sample) {
     // Snapshot lookup only: no file I/O, allocation or blocking in the callback.
     if (ranges.lock.test_and_set(std::memory_order_acquire)) return false;
-    const bool global = covers(ranges.rows.data(), ranges.rows.size(), base + 0xe435d0, 16, false) &&
-                        covers(ranges.rows.data(), ranges.rows.size(), base + 0xe459e8, 4, false);
+    const bool global = covers(ranges.rows.data(), ranges.rows.size(), base + profile.stride, 16, false) &&
+                        covers(ranges.rows.data(), ranges.rows.size(), base + profile.selector, 4, false);
     uint32_t selector = 2;
     int32_t stride = 0;
     if (global) {
-        std::memcpy(&selector, reinterpret_cast<void *>(base + 0xe459e8), 4);
-        std::memcpy(&stride, reinterpret_cast<void *>(base + 0xe435d0), 4);
+        std::memcpy(&selector, reinterpret_cast<void *>(base + profile.selector), 4);
+        std::memcpy(&stride, reinterpret_cast<void *>(base + profile.stride), 4);
     }
-    const uintptr_t matrix = base + 0xe435e8 + static_cast<uintptr_t>(selector) * 0x1200;
+    const uintptr_t matrix = base + profile.matrix + static_cast<uintptr_t>(selector) * 0x1200;
     bool good = global && selector < 2 && covers(ranges.rows.data(), ranges.rows.size(), matrix, 0x1200, true);
     size_t span = 0;
     if (sample) {
@@ -82,7 +83,8 @@ bool views(uintptr_t base, uintptr_t input, RawView *raw, PairView *pair, bool s
 
 uint32_t dispatch(SavedContext *ctx, uint32_t stage, uintptr_t base) noexcept {
     hits.fetch_add(1, std::memory_order_relaxed);
-    if (!ctx || stage > 1 || ready_base.load(std::memory_order_acquire) != base) return 0;
+    const RuntimeProfile *profile = ready_profile.load(std::memory_order_acquire);
+    if (!ctx || stage > 1 || !profile || ready_base.load(std::memory_order_acquire) != base) return 0;
     const int tid = static_cast<int>(syscall(SYS_gettid));
     FrameSlot *slot = nullptr;
     for (auto &candidate : frames) {
@@ -111,15 +113,15 @@ uint32_t dispatch(SavedContext *ctx, uint32_t stage, uintptr_t base) noexcept {
         RawView raw{};
         PairView pair{};
         // Native-only plans also enter here to latch the later LUT settings.
-        if (!views(base, ctx->x[19], &raw, &pair, true)) {
+        if (!views(*profile, base, ctx->x[19], &raw, &pair, true)) {
             slot->tid.store(0, std::memory_order_release);
             rejected.fetch_add(1, std::memory_order_relaxed);
             return 0;
         }
         const Route route = on_sample(slot->frame, mailbox, ctx->original_sp, raw, pair);
         if (route == Route::Replaced) {
-            ctx->x[20] = base + 0xe45000;
-            ctx->x[27] = base + 0xe43588;
+            ctx->x[20] = base + profile->bridge_x20;
+            ctx->x[27] = base + profile->bridge_x27;
             samples.fetch_add(1, std::memory_order_relaxed);
         } else if (route == Route::Rejected) rejected.fetch_add(1, std::memory_order_relaxed);
         return static_cast<uint32_t>(route);
@@ -127,7 +129,7 @@ uint32_t dispatch(SavedContext *ctx, uint32_t stage, uintptr_t base) noexcept {
     if (!slot) return 0; // installed mid-frame, missing sample or no active plan
     Route route = Route::Original;
     PairView pair{};
-    if (ctx->fpcr == 0 && views(base, 0, nullptr, &pair, false)) {
+    if (ctx->fpcr == 0 && views(*profile, base, 0, nullptr, &pair, false)) {
         route = on_lut(slot->frame, mailbox, ctx->original_sp, pair);
     } else rejected.fetch_add(1, std::memory_order_relaxed);
     slot->tid.store(0, std::memory_order_release);
@@ -136,7 +138,7 @@ uint32_t dispatch(SavedContext *ctx, uint32_t stage, uintptr_t base) noexcept {
     return static_cast<uint32_t>(route);
 }
 
-bool note_id(const dl_phdr_info *info) {
+bool note_id(const dl_phdr_info *info, const uint8_t *expected) {
     for (size_t i = 0; i < info->dlpi_phnum; ++i) {
         const auto &ph = info->dlpi_phdr[i];
         if (ph.p_type != PT_NOTE || ph.p_filesz > 65536) continue;
@@ -150,38 +152,53 @@ bool note_id(const dl_phdr_info *info) {
             const size_t descs = (static_cast<size_t>(note.n_descsz) + 3) & ~size_t{3};
             if (names > ph.p_filesz - offset || descs > ph.p_filesz - offset - names) break;
             if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4 &&
-                note.n_descsz == sizeof(kBuildId) && std::memcmp(p + offset, "GNU", 4) == 0 &&
-                std::memcmp(p + offset + names, kBuildId, sizeof(kBuildId)) == 0) return true;
+                note.n_descsz == kBuildIdBytes && std::memcmp(p + offset, "GNU", 4) == 0 &&
+                std::memcmp(p + offset + names, expected, kBuildIdBytes) == 0) return true;
             offset += names + descs;
         }
     }
     return false;
 }
 int inspect(dl_phdr_info *info, size_t, void *opaque) {
-    if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libvrruntimeservice.so") || !note_id(info)) return 0;
-    const uintptr_t base = info->dlpi_addr;
-    bool code = false, data = false;
-    for (size_t i = 0; i < info->dlpi_phnum; ++i) {
-        const auto &p = info->dlpi_phdr[i];
-        if (p.p_type != PT_LOAD) continue;
-        if ((p.p_flags & (PF_R | PF_X)) == (PF_R | PF_X) &&
-            p.p_vaddr <= 0x72e908 && p.p_vaddr + p.p_memsz >= 0x72f970) code = true;
-        if ((p.p_flags & (PF_R | PF_W)) == (PF_R | PF_W) &&
-            p.p_vaddr <= 0xe435d0 && p.p_vaddr + p.p_memsz >= 0xe46c88) data = true;
+    if (!info->dlpi_name || !std::strstr(info->dlpi_name, "libvrruntimeservice.so")) return 0;
+    // Identify the image by its build-id and take every address from that
+    // profile. An unknown build-id stays unidentified, so nothing is patched.
+    for (size_t index = 0; index < profile_count(); ++index) {
+        const RuntimeProfile *profile = profile_by_index(index);
+        if (!profile || !note_id(info, profile->build_id)) continue;
+        const uintptr_t base = info->dlpi_addr;
+        bool code = false, data = false;
+        for (size_t i = 0; i < info->dlpi_phnum; ++i) {
+            const auto &p = info->dlpi_phdr[i];
+            if (p.p_type != PT_LOAD) continue;
+            if ((p.p_flags & (PF_R | PF_X)) == (PF_R | PF_X) &&
+                p.p_vaddr <= profile->code_low && p.p_vaddr + p.p_memsz >= profile->code_high) code = true;
+            if ((p.p_flags & (PF_R | PF_W)) == (PF_R | PF_W) &&
+                p.p_vaddr <= profile->data_low && p.p_vaddr + p.p_memsz >= profile->data_high) data = true;
+        }
+        if (!code || !data ||
+            std::memcmp(reinterpret_cast<void *>(base + profile->sample_entry), profile->sample_fingerprint,
+                        kFingerprintBytes) ||
+            std::memcmp(reinterpret_cast<void *>(base + profile->lut_entry), profile->lut_fingerprint,
+                        kFingerprintBytes)) continue;
+        auto *out = static_cast<RuntimeImage *>(opaque);
+        out->base = base;
+        out->profile = profile;
+        return 1;
     }
-    if (!code || !data || std::memcmp(reinterpret_cast<void *>(base + 0x72e908), kSampleFingerprint, 64) ||
-        std::memcmp(reinterpret_cast<void *>(base + 0x72f930), kLutFingerprint, 64)) return 0;
-    static_cast<RuntimeImage *>(opaque)->base = base;
-    return 1;
+    return 0;
 }
 } // namespace
 
 bool find_image(RuntimeImage *out) {
     dl_iterate_phdr(inspect, out);
-    return out->base != 0;
+    return out->base != 0 && out->profile != nullptr;
 }
 uintptr_t callback_address() { return reinterpret_cast<uintptr_t>(&dispatch); }
-void runtime_ready(uintptr_t base) { ready_base.store(base, std::memory_order_release); }
+void runtime_ready(uintptr_t base, const RuntimeProfile *profile) {
+    ready_profile.store(profile, std::memory_order_release);
+    ready_base.store(base, std::memory_order_release);
+}
 
 void *runtime_worker(void *fd_value) {
     const int fd = static_cast<int>(reinterpret_cast<intptr_t>(fd_value));
@@ -195,6 +212,8 @@ void *runtime_worker(void *fd_value) {
             RuntimeImage image;
             if (find_image(&image)) {
                 attempted = true;
+                if (fd >= 0) dprintf(fd, "image_profile=%s base=0x%lx\n",
+                    image.profile->name, static_cast<unsigned long>(image.base));
                 ready = install_bridges(image, fd);
             } else if (tick == 300) {
                 attempted = true;

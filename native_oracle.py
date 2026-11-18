@@ -19,12 +19,34 @@ from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE, __version__ as
 import unicorn.arm64_const as regs
 from elftools.elf.elffile import ELFFile
 
+from runtime_images import image_path, select
+
 PRIVATE_INPUTS = Path(os.environ.get('QUEST_LD_PRIVATE_INPUTS', ROOT / '.private-inputs')).resolve()
-SO = Path(os.environ.get('QUEST_LD_RUNTIME_IMAGE', PRIVATE_INPUTS / 'libvrruntimeservice.so')).resolve()
+SO = image_path()
 LIBM = PRIVATE_INPUTS / 'libm.so'
-B = 0xe43588
-SELECTOR = B + 0x2460
-VECTOR = 0xe46f90
+# Reviewed image profile: every address below is evidence from SO itself and the
+# SHA256 of SO must match this profile. No profile inherits another's values.
+PROFILE = select(SO)
+CODE = PROFILE['code']
+B = PROFILE['b']
+SELECTOR = PROFILE['selector']
+VECTOR = PROFILE['vector']
+STRIDE = PROFILE['stride']
+RAW_PTR = PROFILE['raw_ptr']
+X20 = PROFILE['x20']
+HEADER = PROFILE['header']
+X24_PAGE = PROFILE['x24_page']
+HIST0, HIST1 = PROFILE['hist0'], PROFILE['hist1']
+FLAG0, FLAG1 = PROFILE['flag0'], PROFILE['flag1']
+SCRATCH_CELL = PROFILE['scratch']
+MODE4 = PROFILE['mode4']
+FORCE_CLAMP = PROFILE['force_clamp']
+CFG_WEIGHT = PROFILE['cfg_weight']
+CFG_OBJECTS = (PROFILE['cfg_dilate_x'], PROFILE['cfg_dilate_y'], PROFILE['cfg_gaussian'], PROFILE['cfg_smooth'])
+CFG_FIELD = PROFILE['cfg_field']
+EYE_STRUCTS = PROFILE['eye_structs']
+GOT_EXPF, GOT_POWF = PROFILE['got_expf'], PROFILE['got_powf']
+TRACE_CTX = PROFILE['trace_ctx']
 KERNEL = 0x5000000
 SCRATCH = 0x5100000
 RAW = 0x5200000
@@ -63,22 +85,24 @@ class Oracle:
             symbols = ELFFile(f).get_section_by_name('.dynsym')
             expf = symbols.get_symbol_by_name('expf')[0]['st_value']
             powf = symbols.get_symbol_by_name('powf')[0]['st_value']
-        self.u64(0xe19940, LIBM_BASE + expf)
-        self.u64(0xe19918, LIBM_BASE + powf)
-        self.u64(0xe17ed8, SCRATCH)  # trace flag at +3 is zero
+        self.u64(GOT_EXPF, LIBM_BASE + expf)
+        self.u64(GOT_POWF, LIBM_BASE + powf)
+        self.u64(TRACE_CTX, SCRATCH)  # trace flag at +3 is zero
         self.uc.reg_write(regs.UC_ARM64_REG_TPIDR_EL0, SCRATCH+0x100)
         self.u64(VECTOR, KERNEL)
         self.u64(VECTOR+8, KERNEL)
         self.u64(VECTOR+16, KERNEL+0x10000)
         self.uc.mem_write(SCRATCH+0x1000, struct.pack('<21H', *LUT))
-        self.u64(0xe46bf0, SCRATCH+0x1000)
-        self.u64(0xe46bf8, SCRATCH+0x1000+42)
-        self.uc.mem_write(0xe46f60, b'\x01')
-        self.uc.mem_write(0xe46f80, b'\x01')
-        self.u64(0xe46f48, HISTORY)
-        self.u64(0xe46f68, HISTORY+0x900)
-        self.uc.hook_add(UC_HOOK_CODE, self.property_refresh, begin=0xd80c18, end=0xd80c18)
-        self.uc.hook_add(UC_HOOK_CODE, self.resize_vector, begin=0x3a77c8, end=0x3a77c8)
+        self.u64(HEADER, SCRATCH+0x1000)
+        self.u64(HEADER+8, SCRATCH+0x1000+42)
+        self.uc.mem_write(FLAG0, b'\x01')
+        self.uc.mem_write(FLAG1, b'\x01')
+        self.u64(HIST0, HISTORY)
+        self.u64(HIST1, HISTORY+0x900)
+        self.uc.hook_add(UC_HOOK_CODE, self.property_refresh,
+                         begin=PROFILE['prop_refresh'], end=PROFILE['prop_refresh'])
+        self.uc.hook_add(UC_HOOK_CODE, self.resize_vector,
+                         begin=PROFILE['resize_vector'], end=PROFILE['resize_vector'])
         self.prepare()
 
     def load_elf(self, path, base):
@@ -115,7 +139,7 @@ class Oracle:
     def prepare(self):
         self.reg('sp', SP)
         self.reg('x29', SP+0x100)
-        self.reg('x20', 0xe45000)
+        self.reg('x20', X20)
         self.reg('x27', B)
         self.reg('x28', SCRATCH)
         self.reg('fpcr', 0)  # nearest-even, gradual underflow
@@ -137,22 +161,22 @@ class Oracle:
         self.prepare()
 
     def config(self, x=1, y=2, gaussian=3, smooth=1, weight=0.3, property_valid=1):
-        for obj, value in [(0xe43040, x), (0xe430e8, y), (0xe43190, gaussian), (0xe43238, smooth)]:
-            self.uc.mem_write(obj+0x98, struct.pack('<iB3xi', value if property_valid else 0, property_valid, value))
-        self.uc.mem_write(0xe42f98+0x98, struct.pack('<fB3xf', weight if property_valid else 0, property_valid, weight))
+        for obj, value in zip(CFG_OBJECTS, (x, y, gaussian, smooth)):
+            self.uc.mem_write(obj+CFG_FIELD, struct.pack('<iB3xi', value if property_valid else 0, property_valid, value))
+        self.uc.mem_write(CFG_WEIGHT+CFG_FIELD, struct.pack('<fB3xf', weight if property_valid else 0, property_valid, weight))
 
     def sample(self, raw, stride):
         self.uc.mem_write(RAW, raw)
-        self.i32(0xe435d0, stride)
+        self.i32(STRIDE, stride)
         self.reg('x19', RAW)
-        self.execute(0x72e908, 0x72ec4c)
+        self.execute(*CODE['sample'])
 
     def dilate(self, x, y):
         assert x >= 0 and y >= 0
         self.reg('x19', y)
         self.reg('x21', x)
         self.reg('x22', x)
-        self.execute(0x72ed60, 0x72f074)
+        self.execute(*CODE['dilate'])
 
     def kernel(self, size):
         self.prepare()
@@ -162,7 +186,7 @@ class Oracle:
         self.u64(SP+0x28, size>>1)
         self.u64(SP+0x30, size)
         self.u64(VECTOR+8, KERNEL+size*size*4)
-        self.execute(0x72f170, 0x72f274)
+        self.execute(*CODE['kernel'])
         return bytes(self.uc.mem_read(KERNEL, size*size*4))
 
     def gaussian(self, size, kernel):
@@ -176,21 +200,27 @@ class Oracle:
         self.reg('x19', KERNEL)
         self.reg('x21', size)
         self.reg('x22', self.state()['selector'])
-        self.execute(0x72f274, 0x72f81c)
+        self.execute(*CODE['gaussian'])
 
     def smooth(self, current, previous, weight, valid=1):
         self.uc.mem_write(HISTORY, previous)
         self.uc.mem_write(SCRATCH+0x4000, current)
-        self.reg('x19', HISTORY)
-        self.reg('x20', SCRATCH+0x4000)
-        self.reg('x21', 0xe42f98)
-        self.reg('w8', valid)
-        self.uc.mem_write(0xe42f98+0x98, struct.pack('<fB3xf', weight, valid, weight))
-        self.execute(0x7324f8, 0x7326e0)
+        if PROFILE['smooth_args']:
+            # This image takes (target, source) as arguments and reads the
+            # weight/valid pair from the reviewed object itself.
+            self.reg('x0', SCRATCH+0x4000)
+            self.reg('x1', HISTORY)
+        else:
+            self.reg('x19', HISTORY)
+            self.reg('x20', SCRATCH+0x4000)
+            self.reg('x21', CFG_WEIGHT)
+            self.reg('w8', valid)
+        self.uc.mem_write(CFG_WEIGHT+CFG_FIELD, struct.pack('<fB3xf', weight, valid, weight))
+        self.execute(*CODE['smooth'])
         return bytes(self.uc.mem_read(SCRATCH+0x4000, 0x900)), bytes(self.uc.mem_read(HISTORY, 0x900))
 
     def lut(self):
-        self.execute(0x72f930, 0x72fa98)
+        self.execute(*CODE['lut'])
 
     def generate_lut(self, threshold, gamma):
         assert threshold > 0 and gamma > 0
@@ -198,32 +228,33 @@ class Oracle:
         self.reg('s8', struct.unpack('<I', struct.pack('<f', gamma))[0])
         self.reg('s9', struct.unpack('<I', struct.pack('<f', threshold))[0])
         self.reg('s10', struct.unpack('<I', struct.pack('<f', 8190))[0])
-        self.reg('x24', 0xe46000)
+        self.reg('x24', X24_PAGE)
         self.reg('x25', 0)
         self.reg('x27', threshold+1)
-        self.u64(0xe46bf0, SCRATCH+0x1000)
+        self.u64(HEADER, SCRATCH+0x1000)
         # Skip only the string formatting/logging after each table store.
         def skip_format(uc, address, size, user):
-            self.reg('pc', 0x72d88c)
-        hook = self.uc.hook_add(UC_HOOK_CODE, skip_format, begin=0x72d8bc, end=0x72d8bc)
+            self.reg('pc', PROFILE['lutgen_resume'])
+        hook = self.uc.hook_add(UC_HOOK_CODE, skip_format,
+                                begin=PROFILE['lutgen_skip'], end=PROFILE['lutgen_skip'])
         try:
-            self.execute(0x72d898, 0x72d9b0)
+            self.execute(*CODE['lutgen'])
             return bytes(self.uc.mem_read(SCRATCH+0x1000, 2*(threshold+1)))
         finally:
             self.uc.hook_del(hook)
 
     def native_mapping(self, force_clamp_code):
         self.prepare()
-        self.i32(0xe46c68, 0)  # ordinary mode, no diagnostic uniform value
+        self.i32(MODE4, 0)  # ordinary mode, no diagnostic uniform value
         # S7: substitutes the software code 8190, not measured LED luminance.
-        self.i32(0xe46c84, force_clamp_code)
+        self.i32(FORCE_CLAMP, force_clamp_code)
         for eye in [0,1]:
-            at = B+0x3698+eye*24
+            at = EYE_STRUCTS+eye*24
             self.u64(at, SCRATCH+0x10000+eye*0x1000)
             # 576 big-endian halfwords followed by a zero byte. Confirmed by
             # 0x72cfb4 / 0x72d0e4 and native_output_audit_20261007.
             self.u64(at+8, SCRATCH+0x10000+eye*0x1000+0x481)
-        self.u64(0xe46c50, SCRATCH+0x8000)
+        self.u64(SCRATCH_CELL, SCRATCH+0x8000)
         self.u64(SCRATCH+0x8000, SCRATCH+0x9000)
         self.u64(SCRATCH+0x9030, SCRATCH+0xa000)
         payloads = []
@@ -236,7 +267,7 @@ class Oracle:
             self.reg('pc', uc.reg_read(regs.UC_ARM64_REG_LR))
         hook = self.uc.hook_add(UC_HOOK_CODE, record_submit, begin=SCRATCH+0xa000, end=SCRATCH+0xa000)
         try:
-            self.execute(0x73060c, 0x731304)
+            self.execute(*CODE['native'])
             return payloads
         finally:
             self.uc.hook_del(hook)
@@ -245,9 +276,9 @@ class Oracle:
         self.prepare()
         self.config(**config)
         self.uc.mem_write(RAW, raw)
-        self.i32(0xe435d0, stride)
-        self.u64(0xe435d8, RAW)
-        self.execute(0x72e8a4, 0x72fa98)
+        self.i32(STRIDE, stride)
+        self.u64(RAW_PTR, RAW)
+        self.execute(*CODE['frame'])
         return self.state()
 
 

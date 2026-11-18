@@ -11,7 +11,7 @@ import json
 import random
 import struct
 
-from native_oracle import ROOT, regs
+from native_oracle import ROOT, regs, PROFILE, CODE, X20, B
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UC_HOOK_CODE
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 
@@ -141,8 +141,8 @@ def run_case(words, slots, stage, route, fpcr, rng):
         resume = uc.reg_read(regs.UC_ARM64_REG_LR)
         # Simulate the sampler's declared live-out contract through saved slots.
         if route == 1 and stage == 0:
-            uc.mem_write(context + 20 * 8, struct.pack('<Q', IMAGE + 0xe45000))
-            uc.mem_write(context + 27 * 8, struct.pack('<Q', IMAGE + 0xe43588))
+            uc.mem_write(context + 20 * 8, struct.pack('<Q', IMAGE + X20))
+            uc.mem_write(context + 27 * 8, struct.pack('<Q', IMAGE + B))
         for i in range(31):
             uc.reg_write(getattr(regs, f'UC_ARM64_REG_X{i}'), 0xbaad0000 + i)
         for i in range(32):
@@ -158,7 +158,7 @@ def run_case(words, slots, stage, route, fpcr, rng):
     for i in range(31):
         expected = xs[i]
         if route == 1 and stage == 0 and i in [20, 27]:
-            expected = IMAGE + (0xe45000 if i == 20 else 0xe43588)
+            expected = IMAGE + (X20 if i == 20 else B)
         assert uc.reg_read(getattr(regs, f'UC_ARM64_REG_X{i}')) == expected, ('x', stage, route, i)
     for i in range(32):
         expected = qs[i]

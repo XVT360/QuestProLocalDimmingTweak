@@ -52,7 +52,8 @@ has the emergency restore action. If it is not installed, install the APK from
 
 New prefix: debug.oculus.localDimming.zl2.
 Log: /data/adb/modules/questpro_local_dimming_030/log/zygisk_trace.log
-Firmware build-id and 64-byte fingerprints are pinned. Unsupported image,
+Firmware build-id and 64-byte fingerprints are pinned per reviewed image
+(v207 and v204); an unlisted firmware is refused, never adapted. Unsupported image,
 signal conflict, blocked thread, unsafe instruction position or mmap failure
 refuses activation. Installation pauses other runtime threads for up to 200ms.
 Root may be absent after reboot; module service does not depend on early root.
@@ -73,5 +74,10 @@ A repeated rollback follows an in-flight action. Valid sampler/LUT choices
 stay saved; invalid plans fall back to all defaults. Ordinary parameter reset
 buttons never activate gates or restart Runtime.
 
-This package passed offline compiled arithmetic and bridge tests. Live driver,
-graphics buffer lifetime, VR timing and optical effects require device tests.
+This package passed offline compiled arithmetic and bridge tests, and the v204
+profile passed a live hook test on a Quest Pro running 204.0.0.149.430:
+image_profile=v204, hook_install=ok, 101994 sample and 51283 LUT replacements
+applied with one rejected frame in 315404 hits and no runtime restart. The
+arming, the curve and the disarm were performed with the graphical controller on
+the headset. Optical
+results, long-run driver behaviour and other firmwares remain unverified.

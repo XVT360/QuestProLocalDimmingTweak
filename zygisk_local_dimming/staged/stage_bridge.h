@@ -1,6 +1,7 @@
 #pragma once
 
 #include "stage_bridge_words.h"
+#include "runtime_profile.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -25,11 +26,12 @@ static_assert(offsetof(SavedContext, fpsr) == 0x310);
 
 // Callback ABI: uint32_t callback(SavedContext*, uint32_t stage, uintptr_t base).
 // Only return value 1 skips the native stage. Everything else replays it.
-// Successful Sample MUST set saved x20=base+0xe45000 and x27=base+0xe43588.
-// All other saved registers/flags must remain unchanged. Baseline arithmetic
-// was verified with FPCR=0 only; other FPCR values must initially bypass.
-// Reentrancy, validated matrix lifetimes and FrameTransaction ownership belong
-// to the future adapter, not this byte-template preparer.
+// Successful Sample MUST set saved x20=base+profile.bridge_x20 and
+// x27=base+profile.bridge_x27. All other saved registers/flags must remain
+// unchanged. Baseline arithmetic was verified with FPCR=0 only; other FPCR
+// values must initially bypass. Reentrancy, validated matrix lifetimes and
+// FrameTransaction ownership belong to the future adapter, not this
+// byte-template preparer.
 
 struct PreparedBridge {
     uint32_t words[sizeof(bridge_template::kWords) / sizeof(uint32_t)];
@@ -42,6 +44,6 @@ struct PreparedBridge {
 // change protections, register a hook or flush instruction caches.
 // The eventual installer must validate the full library/entry identity and
 // safe install time, then verify read-back and publish both stages together.
-bool prepare_bridge(Stage stage, uintptr_t image, uintptr_t bridge_address,
-                    uintptr_t callback, PreparedBridge *out) noexcept;
+bool prepare_bridge(Stage stage, const RuntimeProfile &profile, uintptr_t image,
+                    uintptr_t bridge_address, uintptr_t callback, PreparedBridge *out) noexcept;
 } // namespace quest_ld
